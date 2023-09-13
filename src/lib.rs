@@ -149,6 +149,9 @@ impl Image {
             width = mat.cols().try_into()?;
             height = mat.rows().try_into()?;
         }
+        if width == 0 || height == 0 {
+            Err("0 width, or 0 height image!")?;
+        }
         let ratio = (width as f32)/(height as f32);
         println!("󰷊 \t[{:>5}/{:>5}] {}", width, height, filename);
         Ok(Image { filepath, ratio, filename })
