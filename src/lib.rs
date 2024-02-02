@@ -52,6 +52,7 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     }
 
     let database_file_path = String::from(&config.output_path) + "/database.json";
+    println!("Searching for deleted images in {}, this might take a while (~20 seconds) because I'm using a slow data structure :)", database_file_path);
     let mut database = WallpaperDatabase::new(database_file_path.as_str())?;
     database.delete_missing(&mut image_database);
     let mut image_database : Vec<Image> = database.get_regen_image_paths(image_database);
@@ -85,6 +86,7 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
                 Some(index) => {
                     let image_match = image_database.get(index).unwrap().to_owned();
                     image_database.remove(index);
+                    wallpaper_images.push(image_match.clone());
                     image_match
                 },
                 None => match database.original_wallpapers.iter().position(|wallpaper| wallpaper.wallpaper_image.ratio < desired_aspect-working_aspect) {
@@ -100,7 +102,6 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
                     None => break,
                 },
             };
-            wallpaper_images.push(add_image.clone());
             let mut add_mat : Mat = add_image.get_mat()?;
             println!("{} {} \t{} {}",
                 "┊".blue(),
