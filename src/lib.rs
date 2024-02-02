@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::fs;
-use std::path::Path;
+use std::path::{Path,PathBuf};
+use std::fs::File;
 use opencv::prelude::{*};
 use opencv::core::Vector;
 use opencv::dnn_superres::DnnSuperResImpl;
@@ -8,6 +9,8 @@ use rand::prelude::SliceRandom;
 use rand::thread_rng;
 use clap::{Parser,ValueHint};
 use colored::Colorize;
+use serde::{Serialize, Deserialize};
+use std::io::BufWriter;
 
 pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     let output_path = Path::new(&config.output_path);
@@ -29,6 +32,7 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
         upscaler_x2.read_model(fsrcnn_x2)?;
     }
 
+
     let mut remaining_images : Vec<_> = remaining_images.collect();
     remaining_images.shuffle(&mut thread_rng());
 
@@ -40,19 +44,27 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
         }
         let read_path = path.unwrap().path();
         let read_path = read_path.to_str().unwrap_or_default();
+
         match Image::new(read_path) {
             Ok(img) => image_database.push(img),
             Err(err) => println!("Skipping image {} due to error {}", read_path, err),
         }
     }
 
+    let database_file_path = String::from(&config.output_path) + "/database.json";
+    let mut database = WallpaperDatabase::new(database_file_path.as_str())?;
+    database.delete_missing(&mut image_database);
+    let mut image_database : Vec<Image> = database.get_regen_image_paths(image_database);
+
     let mut current_image_number = 0;
     while image_database.len() != 0 {
+        let mut wallpaper_images : Vec<Image> = vec![];
         let current_image = match image_database.pop() {
             Some(img) => img,
             None => break,
         };
         let mut current_mat : Mat = current_image.get_mat()?;
+        wallpaper_images.push(current_image.clone());
 
         println!("{} \t{} {}",
             "󰷊".blue(),
@@ -67,13 +79,28 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
             format!("[{:>5}/{:>5}]", current_mat.cols(), current_mat.rows()).yellow());
 
         println!("{}", "┊".blue());
-        while image_database.len() > 0 && working_aspect < desired_aspect {
-            let add_image_index = match image_database.iter().position(|test| test.ratio < desired_aspect-working_aspect) {
-                Some(i) => i,
-                None => break,
+        while working_aspect < desired_aspect {
+            let mut wallpaper_match : Option<Wallpaper> = None;
+            let add_image = match image_database.iter().position(|test| test.ratio < desired_aspect-working_aspect) {
+                Some(index) => {
+                    let image_match = image_database.get(index).unwrap().to_owned();
+                    image_database.remove(index);
+                    image_match
+                },
+                None => match database.original_wallpapers.iter().position(|wallpaper| wallpaper.wallpaper_image.ratio < desired_aspect-working_aspect) {
+                    Some(wallpaper_index) => {
+                        wallpaper_match = Some(database.original_wallpapers.get(wallpaper_index).unwrap().clone());
+                        let wallpaper_work = wallpaper_match.clone().unwrap();
+                        database.original_wallpapers.remove(wallpaper_index);
+                        for image in &wallpaper_work.original_images {
+                            wallpaper_images.push(image.clone());
+                        }
+                        wallpaper_work.wallpaper_image
+                    },
+                    None => break,
+                },
             };
-
-            let add_image = image_database.get(add_image_index).unwrap();
+            wallpaper_images.push(add_image.clone());
             let mut add_mat : Mat = add_image.get_mat()?;
             println!("{} {} \t{} {}",
                 "┊".blue(),
@@ -98,32 +125,122 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
 
             println!("{}", "┊".blue());
             working_aspect = (current_mat.cols() as f32) / (current_mat.rows() as f32);
-            image_database.remove(add_image_index);
+
+            if wallpaper_match.is_some() {
+                wallpaper_match.unwrap().delete();
+            }
         }
+
         let write_path = output_path.join(format!("{}.jpg",  &current_image_number));
-        let write_path = write_path.to_str().unwrap();
-        current_image_number += 1;
+        let mut write_path = String::from(write_path.to_str().unwrap());
+        while Path::new(write_path.as_str()).exists() {
+            current_image_number += 1;
+            let path_text = output_path.join(format!("{}.jpg",  &current_image_number));
+            write_path = String::from(path_text.to_str().unwrap());
+        }
         opencv::imgcodecs::imwrite(&write_path, &current_mat, &Vector::with_capacity(0))?;
+        current_image_number += 1;
 
         println!("{} \t{} {}",
             "󱣫 ->".green(),
             format!("[{:>5}/{:>5}]", current_mat.cols(), current_mat.rows()).green(),
             &write_path);
 
+        database.original_wallpapers.push(Wallpaper {
+            original_images : wallpaper_images.clone(),
+            wallpaper_image : Image::new(&write_path)?,
+        });
+
         println!("");
     }
+    let file = File::create(database_file_path.as_str()).unwrap();
+    let mut writer = BufWriter::new(file);
+    serde_json::to_writer(&mut writer, &database)?;
     Ok(())
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Image {
     filepath : String,
     filename : String,
     ratio : f32,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Wallpaper {
+    original_images : Vec<Image>,
+    wallpaper_image : Image,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct WallpaperDatabase {
+    original_wallpapers : Vec<Wallpaper>,
+}
+
+impl Wallpaper {
+    pub fn new(original_images : Vec<Image>, filepath : String) -> Wallpaper {
+        Wallpaper { 
+            original_images,
+            wallpaper_image : Image::new(filepath.as_str()).unwrap(),
+        }
+    }
+    pub fn contains_image(&self, image : &Image) -> bool {
+        return self.original_images.iter().any(|wimage| wimage.filename == image.filename);
+    }
+    pub fn delete(&self) {
+        println!("{} \t{}", "󰮘".red(), &self.wallpaper_image.filepath);
+        fs::remove_file(&self.wallpaper_image.filepath).unwrap();
+    }
+    pub fn invalid(&self, images : &Vec<Image>) -> bool {
+        return self.original_images.iter().any(|image| {
+            for other in images {
+                if image.filename == other.filename {
+                    return false;
+                }
+            }
+            return true;
+        });
+    }
+}
+
+impl WallpaperDatabase {
+    pub fn new(filepath : &str) -> Result<WallpaperDatabase, Box<dyn Error>> {
+        match File::open(filepath) {
+            Ok(file) => {
+                let deserialized_database : WallpaperDatabase = serde_json::from_reader(file)?;
+                Ok(deserialized_database)
+            },
+            Err(_err) => Ok(WallpaperDatabase {
+                original_wallpapers : vec![],
+            }),
+        }
+    }
+    pub fn delete_missing(&mut self, images : &Vec<Image>) {
+        let remove_wallpapers = self.original_wallpapers.clone().into_iter().filter(|wallpaper| wallpaper.invalid(&images)).collect::<Vec<Wallpaper>>();
+        for wallpaper in remove_wallpapers {
+            wallpaper.delete();
+        }
+        self.original_wallpapers = self.original_wallpapers.clone().into_iter().filter(|wallpaper| !wallpaper.invalid(&images)).collect::<Vec<Wallpaper>>();
+    }
+    pub fn get_regen_image_paths(&self, images : Vec<Image>) -> Vec<Image> {
+        images.into_iter().filter(|image| {
+            for wallpaper in &self.original_wallpapers {
+                if wallpaper.contains_image(&image) {
+                    return false;
+                }
+            }
+            return true;
+        }).collect::<Vec<Image>>()
+    }
+}
+
 impl Image {
     pub fn new(filepath : &str) -> Result<Image, Box<dyn Error>> {
-        let filepath : String = String::from(filepath);
+        let read_path = fs::canonicalize(PathBuf::from(filepath))?;
+        let read_path = read_path.as_path();
+        let read_path = read_path.to_str().unwrap_or_default();
+
+        let filepath : String = String::from(read_path);
         let filename : String = Path::new(&filepath).file_name().unwrap().to_str().unwrap().to_string();
         let cookie = magic::Cookie::open(magic::CookieFlags::ERROR)?;
         cookie.load::<&str>(&[])?;
