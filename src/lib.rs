@@ -2,7 +2,7 @@ use std::error::Error;
 use std::fs;
 use std::path::{Path,PathBuf};
 use std::fs::File;
-use opencv::prelude::{*};
+use opencv::prelude::*;
 use opencv::core::Vector;
 use opencv::dnn_superres::DnnSuperResImpl;
 use rand::prelude::SliceRandom;
@@ -243,8 +243,11 @@ impl Image {
 
         let filepath : String = String::from(read_path);
         let filename : String = Path::new(&filepath).file_name().unwrap().to_str().unwrap().to_string();
-        let cookie = magic::Cookie::open(magic::CookieFlags::ERROR)?;
-        cookie.load::<&str>(&[])?;
+        
+        let cookie = magic::Cookie::open(magic::cookie::Flags::ERROR)?;
+        //let database: DatabasePaths = ["data/tests/db-images-png"].try_into()?;
+        let database: [&[u8]; 1] = [include_bytes!("magic.mgc")];
+        let cookie = cookie.load_buffers(&database)?;
         let analysis = cookie.file(&filepath)?;
         let read_analysis = analysis.split(",");
         let mut width : u32 = 0;
